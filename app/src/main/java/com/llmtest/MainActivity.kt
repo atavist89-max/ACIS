@@ -11,7 +11,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -35,16 +37,16 @@ import java.io.FileReader
 
 class MainActivity : ComponentActivity() {
     private var engine: Engine? = null
-    private var entityList = mutableStateListOf<Pair<String, String>>() // id to caption
     private var selectedEntity by mutableStateOf<Pair<String, String>?>(null)
+
+    companion object {
+        private val entityList = mutableStateListOf<Pair<String, String>>()
+    }
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         BugLogger.initialize(this)
         BugLogger.log("MainActivity.onCreate() started")
-        
-        // Load entities from JSON
-        loadEntityList()
         
         setContent {
             MaterialTheme {
@@ -79,24 +81,27 @@ class MainActivity : ComponentActivity() {
         }
     }
     
-    private fun loadEntityList() {
+    private suspend fun loadEntityList() = withContext(Dispatchers.IO) {
         BugLogger.log("Loading entity list from ${GhostPaths.ENTITIES_JSON}")
         if (!GhostPaths.isEntitiesJsonAvailable()) {
-            BugLogger.log("entities.ftm.json not found")
-            return
+            BugLogger.log("entities.ftm.json not found at ${GhostPaths.ENTITIES_JSON}")
+            return@withContext
         }
+        
+        entityList.clear()
         
         try {
             BufferedReader(FileReader(GhostPaths.ENTITIES_JSON)).use { reader ->
                 var count = 0
                 reader.lineSequence().forEach { line ->
-                    if (line.isNotBlank()) {
+                    if (line.isNotBlank() && count < 500) { // Limit to 500 for performance
                         try {
-                            val json = JSONObject(line)
+                            val json = org.json.JSONObject(line)
                             val id = json.optString("id", "")
                             val caption = json.optString("caption", "")
                             val schema = json.optString("schema", "")
-                            if (id.isNotEmpty() && caption.isNotEmpty() && (schema == "Person" || schema == "Company")) {
+                            if (id.isNotEmpty() && caption.isNotEmpty() && 
+                                (schema == "Person" || schema == "Company")) {
                                 entityList.add(id to caption)
                                 count++
                             }
@@ -270,8 +275,40 @@ class MainActivity : ComponentActivity() {
         var isAnalyzing by remember { mutableStateOf(false) }
         var result by remember { mutableStateOf("") }
         var hasPermission by remember { mutableStateOf(hasStoragePermission()) }
+        var isLoadingEntities by remember { mutableStateOf(false) }
         val scope = rememberCoroutineScope()
         var expanded by remember { mutableStateOf(false) }
+        
+        // Load entities when permission is granted
+        LaunchedEffect(hasPermission) {
+            if (hasPermission && entityList.isEmpty()) {
+                isLoadingEntities = true
+                BugLogger.log("Permission granted, loading entities...")
+                withContext(Dispatchers.IO) {
+                    loadEntityList()
+                }
+                isLoadingEntities = false
+                BugLogger.log("Entities loaded: ${entityList.size}")
+            }
+        }
+        
+        // Check permission on resume (when returning from settings)
+        val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+        DisposableEffect(lifecycleOwner) {
+            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                    val newPermission = hasStoragePermission()
+                    BugLogger.log("ON_RESUME - permission: $newPermission")
+                    if (newPermission != hasPermission) {
+                        hasPermission = newPermission
+                    }
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(observer)
+            }
+        }
         
         Column(
             modifier = Modifier
@@ -303,8 +340,36 @@ class MainActivity : ComponentActivity() {
             Text(status, style = MaterialTheme.typography.bodyMedium)
             
             if (!hasPermission) {
-                Button(onClick = { requestStoragePermission() }) {
+                Text(
+                    "This app needs 'All files access' permission to read the model and sanctions data.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(onClick = { 
+                    BugLogger.log("Opening permission settings...")
+                    requestStoragePermission() 
+                }) {
                     Text("Grant Storage Permission")
+                }
+                Text(
+                    "Tap button → Toggle permission → Return to app",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else if (isLoadingEntities) {
+                CircularProgressIndicator()
+                Text("Loading entity database...")
+            } else if (entityList.isEmpty()) {
+                Text("No entities found in database")
+                Button(onClick = { 
+                    scope.launch {
+                        isLoadingEntities = true
+                        loadEntityList()
+                        isLoadingEntities = false
+                    }
+                }) {
+                    Text("Retry Loading")
                 }
             } else {
                 // Entity Dropdown
@@ -316,7 +381,7 @@ class MainActivity : ComponentActivity() {
                         value = selectedEntity?.second ?: "Select entity...",
                         onValueChange = {},
                         readOnly = true,
-                        label = { Text("Entity") },
+                        label = { Text("Entity (${entityList.size} available)") },
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -325,20 +390,30 @@ class MainActivity : ComponentActivity() {
                     
                     ExposedDropdownMenu(
                         expanded = expanded,
-                        onDismissRequest = { expanded = false }
+                        onDismissRequest = { expanded = false },
+                        modifier = Modifier.heightIn(max = 400.dp)
                     ) {
-                        entityList.take(100).forEach { (id, caption) ->
+                        entityList.forEach { (id, caption) ->
                             DropdownMenuItem(
-                                text = { Text(caption) },
+                                text = { Text(caption, maxLines = 1) },
                                 onClick = {
                                     selectedEntity = id to caption
                                     expanded = false
                                     result = ""
-                                    BugLogger.log("Selected: $caption ($id)")
+                                    BugLogger.log("Selected: $caption")
                                 }
                             )
                         }
                     }
+                }
+                
+                // Selected entity info
+                selectedEntity?.let { (id, caption) ->
+                    Text(
+                        "ID: $id",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 
                 // Analyze Button
@@ -351,15 +426,21 @@ class MainActivity : ComponentActivity() {
                                 status = "Loading entity data..."
                                 result = ""
                                 
-                                val entityData = getEntityDetails(entity.first)
-                                status = "Querying sanctions database..."
-                                val sanctions = querySanctionsForEntity(entity.first)
-                                status = "Analyzing with LLM (temp=0.5)..."
-                                val analysis = analyzeWithLLM(entity.first, entityData, sanctions)
-                                
-                                result = analysis
+                                try {
+                                    val entityData = getEntityDetails(entity.first)
+                                    status = "Querying sanctions database..."
+                                    val sanctions = querySanctionsForEntity(entity.first)
+                                    status = "Analyzing with LLM..."
+                                    val analysis = analyzeWithLLM(entity.first, entityData, sanctions)
+                                    
+                                    result = analysis
+                                    status = "Analysis complete"
+                                } catch (e: Exception) {
+                                    BugLogger.logError("Analysis failed", e)
+                                    result = "Error: ${e.message}"
+                                    status = "Analysis failed"
+                                }
                                 isAnalyzing = false
-                                status = "Analysis complete"
                             }
                         }
                     },
@@ -367,7 +448,10 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     if (isAnalyzing) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
                     } else {
                         Text("Screen Entity")
                     }
@@ -375,8 +459,16 @@ class MainActivity : ComponentActivity() {
                 
                 // Results
                 if (result.isNotEmpty()) {
-                    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-                        Column(modifier = Modifier.padding(16.dp)) {
+                    OutlinedCard(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .padding(16.dp)
+                                .verticalScroll(androidx.compose.foundation.rememberScrollState())
+                        ) {
                             Text(
                                 "Analysis Results",
                                 style = MaterialTheme.typography.titleMedium
@@ -388,6 +480,8 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
+                } else {
+                    Spacer(modifier = Modifier.weight(1f))
                 }
                 
                 // Debug buttons
