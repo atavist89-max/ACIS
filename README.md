@@ -1,32 +1,42 @@
-# ACIS — Minimal LLM Test App
+# ACIS — Sanctions Screening App
 
-A minimal Android app to test on-device inference with **Gemma 4 E2B** using Google's [LiteRT-LM](https://ai.google.dev/edge/litert/models/litert_lm) engine.
+An Android app for on-device sanctions screening using **Gemma 4 E2B** via Google's [LiteRT-LM](https://ai.google.dev/edge/litert/models/litert_lm) engine. It queries a local OpenSanctions database and entities dataset, then uses the LLM to generate factual, data-only risk assessments.
 
 ![Build](https://github.com/atavist89-max/ACIS/actions/workflows/build.yml/badge.svg)
 
 ## What it does
 
-- Displays a single-screen Compose UI with a status indicator.
-- Tries to load a local `.litertlm` model using the **GPU** backend first.
-- Falls back to the **CPU** backend if GPU fails.
-- Shows detailed error messages (exception class + message) when something goes wrong so you can debug quickly.
+- Loads a list of entities (`Person` / `Company`) from a local `entities.ftm.json` file.
+- Lets you select an entity from a dropdown (first 100 shown).
+- Retrieves the full entity record and queries a local SQLite sanctions database (`opensanctions.sqlite`).
+- Sends the entity data + sanctions matches to the on-device LLM with strict instructions to analyze **only the provided data**.
+- Displays a concise, factual risk assessment.
 
-## Requirements
+## Data Requirements
+
+Place the following files on device:
+
+```
+/storage/emulated/0/Download/GhostModels/gemma-4-e2b.litertlm
+/storage/emulated/0/Download/GhostModels/CounterpartyProject/sanctions_data/opensanctions.sqlite
+/storage/emulated/0/Download/GhostModels/CounterpartyProject/sanctions_data/entities.ftm.json
+```
+
+The app verifies each file exists and meets minimum size checks before use.
+
+## System Requirements
 
 - **Android device** running API 36+ (Android 16+).
-- **Model file** placed at:
-  ```
-  /storage/emulated/0/Download/GhostModels/gemma-4-e2b.litertlm
-  ```
-  The app checks that the file exists and is larger than 1,000 MB before attempting to load it.
 - **JDK 21** to build (required by `litertlm-android:0.10.0`).
 - **Android SDK 36**.
+- **Storage permission** (`All files access` on Android 11+) so the app can read the model and data files from external storage.
 
 ## Tech Stack
 
 - **Language:** Kotlin 2.1.20
-- **UI:** Jetpack Compose
+- **UI:** Jetpack Compose (Material 3)
 - **Inference Engine:** `com.google.ai.edge.litertlm:litertlm-android:0.10.0`
+- **Local Database:** SQLite (Android built-in)
 - **Build:** Gradle 8.6, Android Gradle Plugin 8.3.0
 
 ## Build
@@ -35,7 +45,7 @@ A minimal Android app to test on-device inference with **Gemma 4 E2B** using Goo
 ./gradlew assembleDebug
 ```
 
-The APK is produced at:
+APK output:
 ```
 app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -46,34 +56,39 @@ app/build/outputs/apk/debug/app-debug.apk
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Launch the app, tap **"Test LLM Connection"**, and watch the status light:
+Launch the app, grant storage permission if prompted, then:
+1. Select an entity from the dropdown.
+2. Tap **Screen Entity**.
+3. Wait for the analysis to complete.
 
-| Color | Meaning |
-|-------|---------|
-| Gray  | Idle |
-| Yellow| Testing |
-| Green | Connected (GPU or CPU) |
-| Red   | Failed — read the error message below the light |
+| Status Light | Meaning |
+|--------------|---------|
+| Gray         | Idle / waiting for selection |
+| Yellow       | Loading data / querying DB / running LLM |
+| Green        | Analysis complete |
+| Red          | Error occurred |
 
-## Debugging Backend Failures
+## LLM Configuration
 
-If both backends fail, the app prints the exact exception on screen, e.g.:
+- **Temperature:** `0.5` (factual, deterministic output)
+- **Top-K:** `40`
+- **Top-P:** `0.9`
+- **Backend:** GPU (falls back to CPU if unavailable)
+- **Max tokens:** `2048`
 
-```
-GPU: UnsatisfiedLinkError: dlopen failed...
-CPU: IllegalArgumentException: Invalid model format...
-```
+The prompt explicitly instructs the model not to use external knowledge and to base the entire analysis strictly on the provided local data.
 
-This helps distinguish between:
-- Missing/corrupted model files
-- Missing native libraries (`libOpenCL.so`, `libvndksupport.so`)
-- Incompatible model format
-- Out-of-memory errors
+## Debugging
+
+Tap **View Logs** in the app to see a timestamped event log, or use Android Studio / `adb logcat` with the `BugLogger` tag. All major operations (permission checks, file loading, DB queries, LLM initialization, and inference) are logged.
 
 ## Project Structure
 
 ```
-app/src/main/java/com/llmtest/MainActivity.kt  # UI + connection test logic
+app/src/main/java/com/llmtest/BugLogger.kt      # Internal file-based logger
+app/src/main/java/com/llmtest/EntityData.kt     # Entity data class
+app/src/main/java/com/llmtest/GhostPaths.kt     # Paths to model + data files
+app/src/main/java/com/llmtest/MainActivity.kt   # UI + screening logic
 app/src/main/AndroidManifest.xml                # Permissions & native libs
 app/build.gradle                                # App module build config
 build.gradle                                    # Root project plugins
