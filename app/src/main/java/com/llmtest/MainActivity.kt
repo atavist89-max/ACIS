@@ -27,6 +27,7 @@ import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Message
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -34,6 +35,7 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileReader
+import java.util.UUID
 
 class MainActivity : ComponentActivity() {
     private var engine: Engine? = null
@@ -511,6 +513,35 @@ class MainActivity : ComponentActivity() {
                     Spacer(modifier = Modifier.weight(1f))
                 }
                 
+                // Context Test Button
+                Button(
+                    onClick = {
+                        scope.launch {
+                            // Run sequential tests
+                            val testLevels = listOf(2000, 4000, 8000, 16000, 24000, 32000, 48000)
+                            val testEntity = selectedEntity?.first ?: "NK-223yQP6hRaMuiALDCJ6xbY"
+                            
+                            result = "Starting context tests...\n"
+                            
+                            testLevels.forEach { targetTokens ->
+                                status = "Testing $targetTokens tokens..."
+                                val testResult = testContextLimit(targetTokens, testEntity)
+                                result += "\n$testResult\n"
+                                // 30 second cooldown between tests
+                                if (targetTokens != testLevels.last()) {
+                                    delay(30000)
+                                }
+                            }
+                            
+                            status = "All tests complete"
+                        }
+                    },
+                    enabled = !isAnalyzing && selectedEntity != null,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Test Context Limits")
+                }
+                
                 // Debug buttons
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -538,6 +569,103 @@ class MainActivity : ComponentActivity() {
         }
     }
     
+    suspend fun testContextLimit(targetTokenCount: Int, entityId: String): String = withContext(Dispatchers.IO) {
+        val logPrefix = "[TEST-$targetTokenCount]"
+        BugLogger.log("$logPrefix Starting context window test")
+        
+        // 1. Get entity data
+        BugLogger.log("$logPrefix Loading entity: $entityId")
+        val entityJson = getEntityDetails(entityId)
+        val baseChars = entityJson.length
+        BugLogger.log("$logPrefix Base entity: $baseChars chars")
+        
+        // 2. Calculate padding needed (1 token ≈ 3.5 chars)
+        val targetChars = (targetTokenCount * 3.5).toInt()
+        val paddingNeeded = targetChars - baseChars
+        
+        BugLogger.log("$logPrefix Target: $targetTokenCount tokens ≈ $targetChars chars")
+        BugLogger.log("$logPrefix Padding needed: $paddingNeeded chars")
+        
+        if (paddingNeeded <= 0) {
+            BugLogger.log("$logPrefix Entity already large enough, no padding")
+        }
+        
+        // 3. Build padded content
+        val paddingText = if (paddingNeeded > 0) {
+            val filler = "This is padding text to increase token count. The secret code is NIGHT-OWL-734. "
+            val repeats = (paddingNeeded / filler.length) + 1
+            filler.repeat(repeats).take(paddingNeeded)
+        } else ""
+        
+        // Place needle at 75% position if padding exists
+        val combinedContent = if (paddingNeeded > 0) {
+            val firstPart = paddingText.take((paddingText.length * 0.75).toInt())
+            val secondPart = paddingText.drop((paddingText.length * 0.75).toInt())
+            "$firstPart[ENTITY_START]$entityJson[ENTITY_END]$secondPart"
+        } else {
+            entityJson
+        }
+        
+        val totalChars = combinedContent.length
+        val estimatedTokens = (totalChars / 3.5).toInt()
+        BugLogger.log("$logPrefix Total content: $totalChars chars ≈ $estimatedTokens tokens")
+        
+        // 4. Build prompt with needle test
+        val prompt = buildString {
+            appendLine("You are a sanctions screening analyst.")
+            appendLine("Analyze the following entity data and provide a brief summary.")
+            appendLine("If you find the text 'NIGHT-OWL-734' anywhere in the data, include it in your response.")
+            appendLine()
+            appendLine("---BEGIN DATA---")
+            appendLine(combinedContent)
+            appendLine("---END DATA---")
+        }
+        
+        BugLogger.log("$logPrefix Prompt built: ${prompt.length} chars")
+        
+        // 5. Initialize engine if needed
+        if (engine == null) {
+            BugLogger.log("$logPrefix Initializing engine...")
+            val modelFile = GhostPaths.MODEL_FILE
+            val config = EngineConfig(
+                modelPath = modelFile.absolutePath,
+                backend = Backend.GPU(),
+                maxNumTokens = targetTokenCount + 500, // Allow some headroom
+                cacheDir = cacheDir.path
+            )
+            engine = Engine(config)
+            engine?.initialize()
+            BugLogger.log("$logPrefix Engine initialized")
+        }
+        
+        // 6. Execute inference with timing
+        val startTime = System.currentTimeMillis()
+        BugLogger.log("$logPrefix Starting inference...")
+        
+        return@withContext try {
+            val conversation = engine!!.createConversation()
+            conversation.use {
+                val response = it.sendMessage(Message.of(prompt))
+                val responseText = response.toString()
+                val endTime = System.currentTimeMillis()
+                val duration = (endTime - startTime) / 1000.0
+                
+                // Check if needle was found
+                val foundNeedle = responseText.contains("NIGHT-OWL-734")
+                
+                BugLogger.log("$logPrefix SUCCESS: Response in ${duration}s, length: ${responseText.length}")
+                BugLogger.log("$logPrefix Needle found: $foundNeedle")
+                
+                "TEST $targetTokenCount: SUCCESS | Time: ${duration}s | Tokens est: $estimatedTokens | Response: ${responseText.length} chars | Needle: $foundNeedle"
+            }
+        } catch (e: Exception) {
+            val endTime = System.currentTimeMillis()
+            val duration = (endTime - startTime) / 1000.0
+            BugLogger.logError("$logPrefix FAILED after ${duration}s", e)
+            "TEST $targetTokenCount: FAILED | Time: ${duration}s | Error: ${e.javaClass.simpleName}: ${e.message}"
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         BugLogger.log("MainActivity.onDestroy()")
