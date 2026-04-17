@@ -373,7 +373,7 @@ class MainActivity : ComponentActivity() {
         val cacheDir = File("/storage/emulated/0/Download/GhostModels/ACIS_cache")
         val chunkFiles = cacheDir.listFiles { file -> 
             file.name.startsWith("chunk_") 
-        }?.sorted() ?: emptyArray()
+        }?.toList()?.sortedBy { it.name } ?: emptyList()
         
         BugLogger.log("[SEC-TEST] Found ${chunkFiles.size} chunks")
         
@@ -384,7 +384,8 @@ class MainActivity : ComponentActivity() {
         val results = mutableListOf<String>()
         val testChunks = chunkFiles.take(3)
         
-        testChunks.forEachIndexed { index, chunkFile ->
+        for (index in testChunks.indices) {
+            val chunkFile = testChunks[index]
             val result = analyzeSECFilingChunk(chunkFile, index + 1, testChunks.size)
             results.add(result)
             
