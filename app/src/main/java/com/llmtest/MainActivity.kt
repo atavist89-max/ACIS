@@ -297,6 +297,107 @@ class MainActivity : ComponentActivity() {
         }
     }
     
+    suspend fun analyzeSECFilingChunk(chunkFile: File, chunkNumber: Int, totalChunks: Int): String = withContext(Dispatchers.IO) {
+        val logPrefix = "[SEC-CHUNK-$chunkNumber/$totalChunks]"
+        BugLogger.log("$logPrefix Starting analysis")
+        
+        val chunkText = try {
+            chunkFile.readText().take(6000)
+        } catch (e: Exception) {
+            BugLogger.logError("$logPrefix Failed to read chunk", e)
+            return@withContext "CHUNK $chunkNumber: READ_FAIL | Error: ${e.message}"
+        }
+        
+        val charCount = chunkText.length
+        val estimatedTokens = charCount / 4
+        BugLogger.log("$logPrefix Size: $charCount chars ≈ $estimatedTokens tokens")
+        
+        val prompt = buildString {
+            appendLine("You are a financial analyst. Extract key information from this SEC filing excerpt.")
+            appendLine()
+            appendLine("Chunk $chunkNumber of $totalChunks from Apple Inc. 10-K filing.")
+            appendLine()
+            appendLine("---FILING EXCERPT---")
+            appendLine(chunkText)
+            appendLine("---END EXCERPT---")
+            appendLine()
+            appendLine("Extract ONLY:")
+            appendLine("1. Any mentioned subsidiary companies or entities")
+            appendLine("2. Any mentioned executive officers or directors")
+            appendLine("3. Any mentioned countries or jurisdictions")
+            appendLine("4. 'NONE' if nothing relevant found")
+            appendLine()
+            appendLine("Be concise. List format.")
+        }
+        
+        BugLogger.log("$logPrefix Prompt: ${prompt.length} chars")
+        
+        if (engine == null) {
+            BugLogger.log("$logPrefix Initializing engine...")
+            try {
+                val modelFile = GhostPaths.MODEL_FILE
+                val config = EngineConfig(
+                    modelPath = modelFile.absolutePath,
+                    backend = Backend.GPU(),
+                    maxNumTokens = 2500,
+                    cacheDir = cacheDir.path
+                )
+                engine = Engine(config)
+                engine?.initialize()
+            } catch (e: Exception) {
+                return@withContext "CHUNK $chunkNumber: ENGINE_FAIL | ${e.message}"
+            }
+        }
+        
+        val startTime = System.currentTimeMillis()
+        return@withContext try {
+            val conversation = engine!!.createConversation()
+            conversation.use {
+                val response = it.sendMessage(Message.of(prompt))
+                val responseText = response.toString()
+                val duration = (System.currentTimeMillis() - startTime) / 1000.0
+                
+                BugLogger.log("$logPrefix SUCCESS: ${duration}s, response: ${responseText.length}")
+                "CHUNK $chunkNumber: SUCCESS | Time: ${duration}s | Tokens: $estimatedTokens | Response: ${responseText.take(80)}..."
+            }
+        } catch (e: Exception) {
+            val duration = (System.currentTimeMillis() - startTime) / 1000.0
+            BugLogger.logError("$logPrefix FAILED", e)
+            "CHUNK $chunkNumber: FAILED | Time: ${duration}s | Error: ${e.javaClass.simpleName}"
+        }
+    }
+
+    suspend fun testSECFilingAnalysis(): String = withContext(Dispatchers.IO) {
+        BugLogger.log("[SEC-TEST] Starting SEC filing analysis test")
+        
+        val cacheDir = File("/storage/emulated/0/Download/GhostModels/ACIS_cache")
+        val chunkFiles = cacheDir.listFiles { file -> 
+            file.name.startsWith("chunk_") 
+        }?.sorted() ?: emptyArray()
+        
+        BugLogger.log("[SEC-TEST] Found ${chunkFiles.size} chunks")
+        
+        if (chunkFiles.isEmpty()) {
+            return@withContext "No chunks found. Create chunks first:\n\n1. cd /storage/emulated/0/Download/GhostModels/ACIS_cache/\n2. split -b 6000 AAPL_10K_2023.txt chunk_"
+        }
+        
+        val results = mutableListOf<String>()
+        val testChunks = chunkFiles.take(3)
+        
+        testChunks.forEachIndexed { index, chunkFile ->
+            val result = analyzeSECFilingChunk(chunkFile, index + 1, testChunks.size)
+            results.add(result)
+            
+            if (index < testChunks.size - 1) {
+                BugLogger.log("[SEC-TEST] Cooling down 10s...")
+                delay(10000)
+            }
+        }
+        
+        BugLogger.log("[SEC-TEST] Complete")
+        results.joinToString("\n\n")
+    }
+
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     fun SanctionsScreen() {
@@ -540,6 +641,33 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Test Context Limits")
+                }
+
+                // SEC Filing Test Button
+                Button(
+                    onClick = {
+                        scope.launch {
+                            isAnalyzing = true
+                            result = "Analyzing SEC filing chunks..."
+                            
+                            val cacheDir = File("/storage/emulated/0/Download/GhostModels/ACIS_cache")
+                            val chunksExist = cacheDir.listFiles { f -> 
+                                f.name.startsWith("chunk_") 
+                            }?.isNotEmpty() == true
+                            
+                            result = if (chunksExist) {
+                                testSECFilingAnalysis()
+                            } else {
+                                "No chunks found. Run in Termux:\ncd /storage/emulated/0/Download/GhostModels/ACIS_cache/\nsplit -b 6000 AAPL_10K_2023.txt chunk_"
+                            }
+                            
+                            isAnalyzing = false
+                        }
+                    },
+                    enabled = !isAnalyzing,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Test SEC Filing (3 chunks)")
                 }
                 
                 // Debug buttons
