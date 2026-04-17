@@ -142,58 +142,86 @@ class MainActivity : ComponentActivity() {
     }
     
     private suspend fun querySanctionsForEntity(entityId: String): List<String> = withContext(Dispatchers.IO) {
-        BugLogger.log("Querying sanctions DB for: $entityId")
+        BugLogger.log("Querying sanctions for entity: $entityId")
         val matches = mutableListOf<String>()
-        
+
         if (!GhostPaths.isSanctionsDbAvailable()) {
             BugLogger.log("Sanctions DB not available")
             return@withContext matches
         }
-        
+
         val db = android.database.sqlite.SQLiteDatabase.openDatabase(
             GhostPaths.SANCTIONS_DB.absolutePath,
             null,
             android.database.sqlite.SQLiteDatabase.OPEN_READONLY
         )
-        
+
         try {
-            // Try to match by entity ID in names field
+            // METHOD 1: Try to find by entity ID in regular entities table
+            BugLogger.log("Trying entity ID lookup...")
             val cursor = db.rawQuery(
-                "SELECT entity_id, names, programs FROM sanctions_fts WHERE entity_id = ? OR names LIKE ? LIMIT 5",
-                arrayOf(entityId, "%$entityId%")
+                "SELECT id, caption, schema, target FROM entities WHERE id = ? LIMIT 1",
+                arrayOf(entityId)
             )
-            
-            while (cursor.moveToNext()) {
-                val foundId = cursor.getString(0)
-                val names = cursor.getString(1)
-                val programs = cursor.getString(2)
-                matches.add("ID: $foundId | Names: $names | Programs: $programs")
-                BugLogger.log("Found match: $foundId")
+
+            if (cursor.moveToFirst()) {
+                val id = cursor.getString(0)
+                val caption = cursor.getString(1)
+                val schema = cursor.getString(2)
+                val target = cursor.getInt(3)
+                val targetStr = if (target == 1) "SANCTIONED" else "Not sanctioned"
+                matches.add("Entity: $caption | Type: $schema | Status: $targetStr")
+                BugLogger.log("Found entity in DB: $caption")
             }
             cursor.close()
-            
-            // If no direct match, try caption search
+
+            // METHOD 2: Search by caption using LIKE (avoid FTS5)
             if (matches.isEmpty() && selectedEntity != null) {
                 val caption = selectedEntity!!.second
-                val captionCursor = db.rawQuery(
-                    "SELECT entity_id, names, programs FROM sanctions_fts WHERE names MATCH ? LIMIT 5",
-                    arrayOf(caption)
+                BugLogger.log("Searching by caption LIKE: $caption")
+
+                // Use substring search with LIKE (slower but no FTS5 required)
+                val searchTerm = "%${caption.take(20)}%" // First 20 chars
+                val likeCursor = db.rawQuery(
+                    "SELECT id, caption, schema, target FROM entities WHERE caption LIKE ? LIMIT 10",
+                    arrayOf(searchTerm)
                 )
-                while (captionCursor.moveToNext()) {
-                    val foundId = captionCursor.getString(0)
-                    val names = captionCursor.getString(1)
-                    val programs = captionCursor.getString(2)
-                    matches.add("ID: $foundId | Names: $names | Programs: $programs")
+
+                while (likeCursor.moveToNext()) {
+                    val id = likeCursor.getString(0)
+                    val cap = likeCursor.getString(1)
+                    val schema = likeCursor.getString(2)
+                    val target = likeCursor.getInt(3)
+                    val targetStr = if (target == 1) "SANCTIONED" else "Not sanctioned"
+                    matches.add("Match: $cap | Type: $schema | Status: $targetStr")
+                    BugLogger.log("Found match: $cap")
                 }
-                captionCursor.close()
+                likeCursor.close()
             }
+
+            // METHOD 3: Check if entity has any relationships/associations
+            if (matches.isNotEmpty()) {
+                BugLogger.log("Checking for sanctions programs...")
+                // Look for program info in the entity properties or related tables
+                val propCursor = db.rawQuery(
+                    "SELECT key, value FROM entity_properties WHERE entity_id = ? AND key LIKE '%program%'",
+                    arrayOf(entityId)
+                )
+                while (propCursor.moveToNext()) {
+                    val key = propCursor.getString(0)
+                    val value = propCursor.getString(1)
+                    matches.add("Program: $value")
+                }
+                propCursor.close()
+            }
+
         } catch (e: Exception) {
-            BugLogger.logError("DB query failed", e)
+            BugLogger.logError("Database query failed", e)
         } finally {
             db.close()
         }
-        
-        BugLogger.log("Total matches: ${matches.size}")
+
+        BugLogger.log("Total matches found: ${matches.size}")
         matches
     }
     
