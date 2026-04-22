@@ -124,7 +124,7 @@ Always run on a background thread (`Dispatchers.IO`). Use a single `Conversation
 val conversation = engine.createConversation(
     ConversationConfig(
         samplerConfig = SamplerConfig(
-            temperature = 0.5,
+            temperature = 0.7,
             topK = 40,
             topP = 0.9
         )
@@ -193,13 +193,76 @@ override fun onDestroy() {
 
 ---
 
-## 5. Project Structure
+## 5. On-Device Data Connection Patterns
+
+> This project originally queried local **SQLite** and **JSON** files alongside the LLM. The patterns below are preserved as a reference for any future project that needs to read local databases or structured files on-device.
+
+### 5.1 SQLite Database Access
+
+```kotlin
+// Open a read-only database from external storage
+val db = android.database.sqlite.SQLiteDatabase.openDatabase(
+    dbFile.absolutePath,
+    null,
+    android.database.sqlite.SQLiteDatabase.OPEN_READONLY
+)
+
+try {
+    val cursor = db.rawQuery(
+        "SELECT id, name, status FROM records WHERE id = ? LIMIT 1",
+        arrayOf(recordId)
+    )
+    if (cursor.moveToFirst()) {
+        val name = cursor.getString(1)
+        // ...
+    }
+    cursor.close()
+} finally {
+    db.close()
+}
+```
+
+**Best practices:**
+- Always use `OPEN_READONLY` if you do not need to write.
+- Always `close()` the cursor and database (prefer `try/finally`).
+- Run on `Dispatchers.IO`.
+
+### 5.2 Streaming JSON (ND-JSON / JSONL)
+
+For large JSON files, stream line-by-line instead of loading the whole file into memory:
+
+```kotlin
+BufferedReader(FileReader(jsonFile)).use { reader ->
+    var count = 0
+    reader.lineSequence().forEach { line ->
+        if (line.isNotBlank() && count < 500) {
+            try {
+                val json = org.json.JSONObject(line)
+                val id = json.optString("id", "")
+                val caption = json.optString("caption", "")
+                // ...
+            } catch (e: Exception) {
+                // Skip invalid lines
+            }
+        }
+    }
+}
+```
+
+**Best practices:**
+- Use `lineSequence()` for lazy streaming.
+- Cap the read count to protect UI performance.
+- Catch and skip malformed lines—ND-JSON files are often imperfect.
+
+---
+
+## 6. Project Structure
 
 ```
 app/src/main/java/com/llmtest/
 ├── BugLogger.kt      # File-based timestamped logger (+ View Logs / Copy Logs)
 ├── GhostPaths.kt     # Hard-coded absolute path to the model
-└── MainActivity.kt   # UI (Jetpack Compose), LLM inference, tests
+└── MainActivity.kt   # UI (Jetpack Compose), LLM inference, context tests
 
 app/src/main/AndroidManifest.xml   # MANAGE_EXTERNAL_STORAGE + native libs
 app/build.gradle                    # Dependencies (litertlm-android:0.10.0)
@@ -207,7 +270,7 @@ app/build.gradle                    # Dependencies (litertlm-android:0.10.0)
 
 ---
 
-## 6. Build & Install
+## 7. Build & Install
 
 **Requirements:**
 - Android device running **API 36+ (Android 16+)**
@@ -221,12 +284,12 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 
 ---
 
-## 7. CI
+## 8. CI
 
 GitHub Actions (`.github/workflows/build.yml`) builds the debug APK on every push and PR to `main`.
 
 ---
 
-## 8. License
+## 9. License
 
 Personal test / debugging project. No production warranty implied.
